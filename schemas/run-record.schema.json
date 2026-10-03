@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shotlock.local/schemas/run-record.schema.json",
+  "title": "RunRecord",
+  "description": "Immutable reproducibility manifest for exactly one render or import. run_id is unique and permanent: a retry gets a NEW run_id and can never overwrite earlier evidence. Reproducibility means the run can be reconstructed; bit-identical output across hardware or nondeterministic kernels is a separate property and must be reported honestly in output_identity.",
+  "type": "object",
+  "required": [
+    "run_id",
+    "intent_revision",
+    "project_id",
+    "shot_id",
+    "source_digest",
+    "mode",
+    "started_at",
+    "finished_at",
+    "exit_state",
+    "configuration",
+    "output_digest",
+    "analysis_transforms"
+  ],
+  "properties": {
+    "run_id": { "type": "string", "minLength": 8, "description": "Immutable identity (e.g. ULID). Unique per attempt." },
+    "intent_revision": { "type": "integer", "minimum": 1 },
+    "project_id": { "type": "string" },
+    "shot_id": { "type": "string" },
+    "source_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "conditioning_digests": {
+      "type": "array",
+      "description": "Masks, reference frames, LoRAs, and other conditioning assets by digest.",
+      "items": { "type": "object", "required": ["kind", "digest"], "properties": {
+        "kind": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      }, "additionalProperties": true },
+      "default": []
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["inference", "imported_render"],
+      "description": "Importing an existing render is a first-class mode; the reviewer must be useful without live generation."
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "exit_state": { "type": "string", "enum": ["completed", "failed", "interrupted"] },
+    "configuration": {
+      "type": "object",
+      "required": ["backend", "preprocessing_transforms"],
+      "properties": {
+        "backend": {
+          "type": "object",
+          "required": ["name", "model_identifier"],
+          "properties": {
+            "name": { "type": "string", "description": "e.g. 'void', 'imported'" },
+            "model_identifier": { "type": "string" },
+            "adapter_identifiers": { "type": "array", "items": { "type": "string" }, "default": [] },
+            "checkpoint_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+            "license": { "type": "string", "description": "Model/dataset license recorded separately from contributor permissions." }
+          },
+          "additionalProperties": true
+        },
+        "seed": { "type": ["integer", "string"] },
+        "sampler": { "type": "string" },
+        "inference_parameters": { "type": "object", "additionalProperties": true },
+        "dependency_versions": { "type": "object", "additionalProperties": true },
+        "hardware": { "type": "object", "description": "GPU/CPU model, VRAM, count.", "additionalProperties": true },
+        "precision": { "type": "string", "description": "e.g. fp16, bf16, q8 — quantization is an experiment until measured." },
+        "preprocessing_transforms": {
+          "type": "array",
+          "description": "Every transform applied before comparison. Reports must disclose these.",
+          "items": { "type": "object", "required": ["kind"], "properties": { "kind": { "type": "string" }, "parameters": { "type": "object", "additionalProperties": true } }, "additionalProperties": true }
+        }
+      },
+      "additionalProperties": true
+    },
+    "output_digest": {
+      "type": ["string", "null"],
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Generated media digest. Null when exit_state != completed."
+    },
+    "output_identity": {
+      "type": "string",
+      "enum": ["bit_identical", "reconstructible", "not_claimed"],
+      "default": "not_claimed",
+      "description": "Bit-identical output is a separate, stronger property than reproducibility."
+    },
+    "analysis_transforms": {
+      "type": "array",
+      "description": "Transforms applied purely for analysis (proxies, resampling). Analysis proxies are separate from finishing outputs.",
+      "items": { "type": "object", "required": ["kind"], "properties": { "kind": { "type": "string" }, "parameters": { "type": "object", "additionalProperties": true } }, "additionalProperties": true }
+    },
+    "measured_cost": {
+      "type": "object",
+      "properties": {
+        "compute_seconds": { "type": "number", "minimum": 0 },
+        "currency": { "type": "string" },
+        "amount": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "reviewer_decisions": {
+      "type": "array",
+      "description": "Human decisions, each binding a candidate digest AND the reviewed intent revision.",
+      "items": {
+        "type": "object",
+        "required": ["candidate_digest", "intent_revision", "decision"],
+        "properties": {
+          "candidate_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "intent_revision": { "type": "integer", "minimum": 1 },
+          "decision": { "type": "string", "enum": ["accepted", "rejected", "retry_authorized"] },
+          "reviewer": { "type": "string" },
+          "decided_at": { "type": "string", "format": "date-time" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "default": []
+    }
+  },
+  "additionalProperties": false
+}

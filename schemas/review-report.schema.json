@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shotlock.local/schemas/review-report.schema.json",
+  "title": "ReviewReport",
+  "description": "Evidence package for one run. Every finding cites a constraint, a comparison method, and a frame range. Uncertain findings ask for review; they never claim creative correctness. missing_checks MUST list every check that did not run — a check that did not run must not appear as passed. The report must open without the application running and must disclose all analysis transforms.",
+  "type": "object",
+  "required": [
+    "report_id",
+    "run_id",
+    "intent_revision",
+    "source_digest",
+    "candidate_digest",
+    "generated_at",
+    "findings",
+    "missing_checks",
+    "checks_run",
+    "analysis_transforms"
+  ],
+  "properties": {
+    "report_id": { "type": "string", "minLength": 8 },
+    "run_id": { "type": "string", "minLength": 8 },
+    "intent_revision": { "type": "integer", "minimum": 1 },
+    "source_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "candidate_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["finding_id", "constraint", "comparison_method", "frame_range", "severity", "uncertainty"],
+        "properties": {
+          "finding_id": { "type": "string", "minLength": 1 },
+          "constraint": {
+            "type": "object",
+            "required": ["kind", "class"],
+            "properties": {
+              "kind": { "type": "string", "description": "Which intent constraint this refers to (e.g. protected_content[prop_position])." },
+              "class": {
+                "type": "string",
+                "enum": ["hard", "review_signal"],
+                "description": "Hard failures block acceptance. Review signals route to a human."
+              }
+            },
+            "additionalProperties": true
+          },
+          "comparison_method": { "type": "string", "description": "e.g. 'frame_diff', 'registered_region', 'ocr', 'audio_decode_hash', 'human_label'." },
+          "frame_range": {
+            "type": "object",
+            "required": ["start", "end_exclusive"],
+            "properties": { "start": { "type": "integer", "minimum": 0 }, "end_exclusive": { "type": "integer", "minimum": 1 } },
+            "additionalProperties": false
+          },
+          "affected_region": { "type": "object", "description": "Region descriptor within the frame.", "additionalProperties": true },
+          "severity": { "type": "string", "enum": ["blocking", "review", "informational"] },
+          "uncertainty": {
+            "type": "object",
+            "required": ["level"],
+            "properties": {
+              "level": { "type": "string", "enum": ["low", "medium", "high"] },
+              "note": { "type": "string", "description": "High-uncertainty findings ask for review rather than asserting creative correctness." }
+            },
+            "additionalProperties": false
+          },
+          "supporting_images": { "type": "array", "items": { "type": "string" }, "default": [] },
+          "inspect_path": { "type": "string", "description": "Path to inspect source and candidate at this frame range." },
+          "reviewer_verdict": { "type": "string", "enum": ["actionable", "acceptable", "false_alarm"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "checks_run": {
+      "type": "array",
+      "description": "Checks actually executed for this report, with outcome.",
+      "items": {
+        "type": "object",
+        "required": ["check", "outcome"],
+        "properties": {
+          "check": { "type": "string" },
+          "outcome": { "type": "string", "enum": ["pass", "fail", "unavailable"] },
+          "detail": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "missing_checks": {
+      "type": "array",
+      "description": "MANDATORY disclosure. Every check that did not run appears here with a reason.",
+      "items": {
+        "type": "object",
+        "required": ["check", "reason"],
+        "properties": {
+          "check": { "type": "string" },
+          "reason": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "analysis_transforms": {
+      "type": "array",
+      "description": "All transforms applied before comparison (disclosure; mirrors RunRecord.analysis_transforms).",
+      "items": { "type": "object", "required": ["kind"], "properties": { "kind": { "type": "string" }, "parameters": { "type": "object", "additionalProperties": true } }, "additionalProperties": true }
+    },
+    "export_package": {
+      "type": "object",
+      "description": "Self-contained handoff: HTML report, JSON findings, CSV issue list, selected media, OTIO timeline when validated.",
+      "properties": {
+        "html_report": { "type": "string" },
+        "findings_json": { "type": "string" },
+        "issues_csv": { "type": "string" },
+        "selected_media": { "type": "string" },
+        "otio_timeline": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

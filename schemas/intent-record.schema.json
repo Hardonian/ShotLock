@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shotlock.local/schemas/intent-record.schema.json",
+  "title": "IntentRecord",
+  "description": "One approved edit request. The filmmaker reviews and approves this record BEFORE rendering. An LLM may draft it; approval is human, and approval of one revision can never authorize a different media digest or an expanded edit.",
+  "type": "object",
+  "required": [
+    "intent_revision",
+    "project_id",
+    "shot_id",
+    "source_digest",
+    "frame_range",
+    "frame_rate",
+    "requested_operation",
+    "allowed_edit_region",
+    "allowed_consequence_region",
+    "protected_content",
+    "audio_policy",
+    "approver"
+  ],
+  "properties": {
+    "intent_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic revision number. Expanding the edit area or changing the operation requires a new revision with a new approval."
+    },
+    "project_id": { "type": "string", "minLength": 1 },
+    "shot_id": { "type": "string", "minLength": 1 },
+    "source_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Immutable digest of the source media this intent applies to."
+    },
+    "frame_range": {
+      "type": "object",
+      "required": ["start", "end_exclusive"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end_exclusive": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "frame_rate": {
+      "type": "object",
+      "description": "Rational frame rate (e.g. 24000/1001). Decimal fps hides NTSC rates.",
+      "required": ["numerator", "denominator"],
+      "properties": {
+        "numerator": { "type": "integer", "minimum": 1 },
+        "denominator": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "requested_operation": {
+      "type": "string",
+      "description": "What the filmmaker asked for, in their words plus a normalized verb.",
+      "properties": {
+        "verb": { "type": "string", "enum": ["remove_object", "other"] }
+      },
+      "required": ["verb"],
+      "type": "object",
+      "additionalProperties": true
+    },
+    "allowed_edit_region": {
+      "type": "object",
+      "description": "Region the edit is authorized to change. This is the authorization boundary; it may not be silently expanded.",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["bbox_per_frame", "mask_sequence", "whole_shot"] },
+        "path": { "type": "string", "description": "Path to the mask/region asset, referenced by digest in RunRecord." }
+      },
+      "additionalProperties": true
+    },
+    "allowed_consequence_region": {
+      "type": "object",
+      "description": "Region where SECOND-ORDER changes are legitimate (e.g. a shadow or interacting object). A checker that treats every changed pixel as failure would reject correct results.",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["bbox_per_frame", "mask_sequence", "empty"] },
+        "rationale": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "protected_content": {
+      "type": "array",
+      "description": "What must survive the edit. Each entry names a review-signal class that will be checked.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "region"],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "foreground_performance",
+              "camera_movement",
+              "cut_timing",
+              "production_sound",
+              "prop_position",
+              "text",
+              "logo",
+              "eyeline",
+              "other"
+            ]
+          },
+          "region": { "type": "object", "description": "Region descriptor, same shape as allowed_edit_region." },
+          "notes": { "type": "string" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "audio_policy": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["retain_source", "retain_container_audio", "replace", "mute"],
+          "description": "Hard constraint. Audio retention policy mismatches are failures, not review signals."
+        },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "reference_shots": {
+      "type": "array",
+      "items": { "type": "string", "description": "Shot id; adjacent shots used for continuity checks." },
+      "default": []
+    },
+    "approver": {
+      "type": "object",
+      "required": ["name", "approved_at"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "approved_at": { "type": "string", "format": "date-time" },
+        "role": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
