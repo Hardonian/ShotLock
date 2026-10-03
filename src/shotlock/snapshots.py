@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess  # nosec B404 — ffmpeg invoked with a fixed argument list, never a shell
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -98,25 +99,38 @@ def attach_finding_snapshots(
     snap_dir.mkdir(parents=True, exist_ok=True)
     generated = 0
     gaps: list[str] = []
-    for finding in findings:
+
+    # Build the grab work items (cheap, sequential) …
+    work: list[tuple[dict[str, Any], str, int, str]] = []
+    for idx, finding in enumerate(findings):
         if not isinstance(finding, dict):
             continue
         finding.setdefault("supporting_images", [])
-        finding_id = str(finding.get("finding_id") or f"finding-{generated + 1}")
+        finding_id = str(finding.get("finding_id") or f"finding-{idx + 1}")
         frame_index = _representative_frame(finding.get("frame_range") or {})
         if frame_index is None:
             gaps.append(f"{finding_id}: no machine-readable frame range; no snapshot")
             continue
-        rel = f"{SNAPSHOT_DIR}/{finding_id}.png"
-        ok = _grab_side_by_side(
+        work.append((finding, finding_id, frame_index, f"{SNAPSHOT_DIR}/{finding_id}.png"))
+
+    # … then run the ffmpeg grabs concurrently (the expensive part). Each grab is
+    # independent; results are applied in order below so output stays deterministic.
+    def _grab(item: tuple[dict[str, Any], str, int, str]) -> bool:
+        _finding, finding_id, frame_index, _rel = item
+        return _grab_side_by_side(
             ffmpeg, str(source_path), str(candidate_path), frame_index, snap_dir / f"{finding_id}.png"
         )
-        if ok:
-            finding["supporting_images"] = [rel]
-            finding["inspect_path"] = rel
-            generated += 1
-        else:
-            gaps.append(f"{finding_id}: frame {frame_index} could not be captured")
+
+    if work:
+        with ThreadPoolExecutor(max_workers=min(8, len(work))) as pool:
+            oks = list(pool.map(_grab, work))
+        for (finding, finding_id, frame_index, rel), ok in zip(work, oks):
+            if ok:
+                finding["supporting_images"] = [rel]
+                finding["inspect_path"] = rel
+                generated += 1
+            else:
+                gaps.append(f"{finding_id}: frame {frame_index} could not be captured")
 
     if generated == 0:
         status = UNAVAILABLE

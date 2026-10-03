@@ -14,6 +14,7 @@ import json
 import re
 import shutil
 import subprocess  # nosec B404 — ffmpeg invoked with fixed argument lists, never a shell
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -530,12 +531,17 @@ def run_checks(
 
     Returns {"checks_run": [...], "findings": [...], "missing_checks": [...]}.
     """
-    results = [
-        media_integrity_check(source_path, candidate_path, intent),
-        audio_preservation_check(source_path, candidate_path, intent),
-        protected_region_check(source_path, candidate_path, intent),
-        frame_duplicate_check(source_path, candidate_path, intent),
+    # The checks are independent and pure (each spawns its own ffmpeg/ffprobe),
+    # so run them concurrently to cut wall-clock on real footage. pool.map
+    # preserves order, so the report stays deterministic regardless of timing.
+    check_fns = [
+        media_integrity_check,
+        audio_preservation_check,
+        protected_region_check,
+        frame_duplicate_check,
     ]
+    with ThreadPoolExecutor(max_workers=len(check_fns)) as pool:
+        results = list(pool.map(lambda fn: fn(source_path, candidate_path, intent), check_fns))
     checks_run: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
     missing_checks: list[dict[str, Any]] = []
