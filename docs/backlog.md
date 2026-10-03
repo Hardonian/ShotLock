@@ -11,9 +11,11 @@ and `bandit -q -r src/ tests/` before every commit; push to origin main.
    finding's frame range, links `supporting_images`/`inspect_path`, and renders
    an `evidence` column in `report.html`. Honest degradation: uncapturable
    frames keep empty `supporting_images` + a manifest gap. 5 tests.
-2. **Frame-duplicate detector.** Detect duplicated frames (compare consecutive
-   decoded frames within the allowed edit region exclusion); validate against
-   `fixtures.inject_duplicated_frame` output. Review signal, localized.
+2. ~~**Frame-duplicate detector.**~~ **DONE** (2026-10-03).
+   `frame_duplicate_check` (checks.py) compares consecutive candidate frames via
+   ffmpeg PSNR, excludes the allowed edit region, and localizes near-identical
+   pairs as review signals. Validated against `fixtures.inject_duplicated_frame`
+   (injected repeat detected + localized). 6 tests.
 3. **OTIO timeline with shot ranges.** Optional `opentimelineio` dependency
    (pyproject extra `otio`); export clip with source_range from intent
    frame_range; validate before shipping or report unavailable. Week 3.
