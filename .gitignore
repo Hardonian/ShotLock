@@ -1,0 +1,19 @@
+# evidence and outputs
+out/
+packages/
+store/
+*.otio
+
+# python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+
+# os/editor
+.DS_Store
+.idea/
+.vscode/

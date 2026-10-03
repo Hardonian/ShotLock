@@ -42,10 +42,21 @@ source and revision history, and leave acceptance to the filmmaker.
 
 ```
 docs/InterPositive-research-brief.md  The research brief (verbatim source document)
-docs/week-plan.md                     Four-week implementation plan + demo outline
+docs/architecture.md                  Entities, processing flow, invariants
+docs/week-plan.md                     Four-week plan, demo outline, evaluation protocol
 schemas/                              Intent, run, and review-report data contracts
 src/shotlock/                          Python analysis tooling (stdlib-first)
+  intent.py                           Intent/run validation + approval binding
+  report.py                           Review-report evidence rules
+  media.py                            ffprobe inspection (honest "unavailable")
+  checks.py                           Deterministic checks (integrity, audio, week-2 gap)
+  backends.py                         Capability interface + imported-render backend
+  pipeline.py                         The 8-step flow; budget/retry enforcement
+  export.py                           HTML/JSON/CSV handoff package (+ OTIO if valid)
+  store.py                            Immutable evidence store (digests, run ids)
+  cli.py                              Command line entry point
 tests/                                Unit tests (python -m unittest)
+.github/workflows/ci.yml              Tests + bandit + schema parse
 ```
 
 ## Contracts
@@ -62,8 +73,12 @@ The three JSON Schemas in `schemas/` are the product's spine:
 
 ```bash
 cd shotlock
-python3 -m unittest discover -s tests -v     # run the test suite (stdlib only)
-python3 -m shotlock.media path/to/clip.mov   # inspect a clip via ffprobe
+python3 -m unittest discover -s tests -v           # full suite (real media via ffmpeg)
+python3 -m shotlock.cli inspect path/to/clip.mov   # inspect a clip via ffprobe
+python3 -m shotlock.cli validate-intent intent.json
+python3 -m shotlock.cli run --intent intent.json \
+    --source source.mov --candidate candidate.mov \
+    --store ./store --out ./out            # end to end: checks, evidence, export
 ```
 
 Requirements: Python 3.11+, `ffprobe` on PATH for media inspection. The
