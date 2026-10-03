@@ -16,19 +16,24 @@ and `bandit -q -r src/ tests/` before every commit; push to origin main.
    ffmpeg PSNR, excludes the allowed edit region, and localizes near-identical
    pairs as review signals. Validated against `fixtures.inject_duplicated_frame`
    (injected repeat detected + localized). 6 tests.
-3. **OTIO timeline with shot ranges.** Optional `opentimelineio` dependency
-   (pyproject extra `otio`); export clip with source_range from intent
-   frame_range; validate before shipping or report unavailable. Week 3.
-4. **Audio track mapping check.** Handle multi-track/production-sound
-   containers: map tracks explicitly, compare per track; report unmapped
-   tracks as missing checks.
-5. **Mask-sequence regions.** Support `mask_sequence` region kind (per-frame
-   mask asset referenced by digest); fall back to unavailable until present.
-6. **Project permission validation.** Step 1 of the processing flow: refuse
-   projects without a recorded clearance/permission record for the source.
-7. **Evaluation harness.** Dev/held-out split by scene, threshold freezing,
-   baseline frame-difference comparison, reviewer-disagreement recording.
-   Week 4; needs the cleared clip set first.
+3. ~~**OTIO timeline with shot ranges.**~~ **DONE** (2026-10-03). `_try_otio`
+   maps the intent frame_range into a clip `source_range` at the intent rational
+   rate, validates by re-reading before reporting exported; optional `otio`
+   extra added. 4 tests.
+4. ~~**Audio track mapping check.**~~ **DONE** (2026-10-03). Per-track decoded
+   md5 comparison (track i -> track i); dropped source tracks are hard retention
+   violations, unmapped additions/tooling gaps are disclosed as missing
+   sub-checks. 4 tests.
+5. ~~**Mask-sequence regions.**~~ **DONE** (2026-10-03). Recognizes
+   `mask_sequence` regions (per-frame mask asset by digest); falls back to
+   unavailable with a precise reason until a validated mask asset exists. 5 tests.
+6. ~~**Project permission validation.**~~ **DONE** (2026-10-03). Step 1 gate:
+   `permission.validate_clearance` refuses to process a source without a
+   RECORDED clearance covering this source digest + project. 6 tests.
+7. ~~**Evaluation harness.**~~ **DONE (scaffold)** (2026-10-03). Scene-split dev/
+   held-out (no leakage), threshold freezing on dev, baseline comparison,
+   reviewer-disagreement recording. Reports unavailable without the cleared clip
+   set (still gated). 7 tests.
 
 ## Gated (needs humans/hardware)
 
