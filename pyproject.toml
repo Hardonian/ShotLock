@@ -9,6 +9,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["bandit"]
+otio = ["opentimelineio"]
 
 [build-system]
 requires = ["setuptools>=68"]

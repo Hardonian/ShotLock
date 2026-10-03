@@ -42,7 +42,7 @@ class EvidenceStore:
 
     def __init__(self, root: str | os.PathLike[str]):
         self.root = Path(root)
-        for sub in ("projects", "runs", "reports", "assets"):
+        for sub in ("projects", "runs", "reports", "assets", "clearances"):
             (self.root / sub).mkdir(parents=True, exist_ok=True)
 
     # -- generic json records -------------------------------------------------
@@ -80,6 +80,22 @@ class EvidenceStore:
                 )
             )
         return digest
+
+    def record_clearance(self, clearance: dict[str, Any]) -> Path:
+        """Record a clearance/permission record keyed by its source digest.
+
+        Immutable: a clearance for a given source is recorded exactly once. This
+        is the "recorded clearance" the pipeline requires before processing.
+        """
+        digest = clearance["source_digest"]
+        return self._record(Path("clearances") / f"{digest.split(':', 1)[1]}.json", clearance)
+
+    def get_clearance(self, source_digest: str) -> dict[str, Any] | None:
+        """The recorded clearance covering this source digest, or None."""
+        rel = Path("clearances") / f"{source_digest.split(':', 1)[1]}.json"
+        if not (self.root / rel).is_file():
+            return None
+        return self._load(rel)
 
     def load_run(self, run_id: str) -> dict[str, Any]:
         return self._load(Path("runs") / run_id / "run.json")

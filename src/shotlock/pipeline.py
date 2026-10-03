@@ -29,6 +29,7 @@ from .intent import (
     validate_run_record,
 )
 from .media import FfprobeMissing, inspect_media
+from .permission import validate_clearance
 from .report import crosscheck_report, validate_report
 from .store import EvidenceStore, new_run_id, sha256_file
 
@@ -79,19 +80,28 @@ def process_edit(
     """Run one approved edit candidate through the evidence pipeline.
 
     Returns {"run": ..., "report": ...} with the recorded records. Raises
-    PipelineError on refusal (bad intent, wrong source, budget, bad input).
+    PipelineError on refusal (no clearance, bad intent, wrong source, budget,
+    bad input).
     """
     # 0. budget — enforced before any work, outside any model
     check_budget(store, budget_ceiling_cad)
 
-    # 1. intent validity
+    # 1. project permission / clearance — refuse unless a clearance is RECORDED
+    #    for THIS source (a clearance for one source never clears a different one)
+    source_digest = sha256_file(source_path)
+    project_id = intent.get("project_id") if isinstance(intent, dict) else None
+    clearance = store.get_clearance(source_digest)
+    perm_errors = validate_clearance(clearance, source_digest, project_id)
+    if perm_errors:
+        raise PipelineError("project permission invalid: " + "; ".join(perm_errors))
+
+    # 2. intent validity
     errors = validate_intent(intent)
     if errors:
         raise PipelineError("intent record invalid: " + "; ".join(errors))
 
-    # 2. approval binds THIS source digest (a different media digest is a
+    # 3. approval binds THIS source digest (a different media digest is a
     #    different edit and requires re-approval)
-    source_digest = sha256_file(source_path)
     if not approval_covers(intent, source_digest):
         raise PipelineError(
             f"approval does not cover source {source_digest}; "

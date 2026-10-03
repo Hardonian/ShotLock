@@ -10,10 +10,12 @@ comparison method, frame range, severity, uncertainty.
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess  # nosec B404 — ffmpeg invoked with fixed argument lists, never a shell
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .media import UNAVAILABLE, FfprobeMissing, compare_integrity, inspect_media
@@ -30,6 +32,9 @@ class CheckResult:
     outcome: str  # "pass" | "fail" | "unavailable"
     findings: list[dict[str, Any]] = field(default_factory=list)
     detail: str | None = None
+    # Per-item sub-checks that did not run (e.g. an unmapped audio track). These
+    # merge into the report's missing_checks so a gap is disclosed, never passed.
+    missing: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _finding(
@@ -106,18 +111,41 @@ def media_integrity_check(source_path: str, candidate_path: str, intent: dict[st
     )
 
 
-def _decoded_audio_md5(path: str) -> tuple[str | None, str | None]:
-    """MD5 of the decoded first audio stream (content comparison, not container
-    hash: container bytes can differ while audio is equivalent).
+def _audio_stream_count(path: str) -> tuple[int | None, str | None]:
+    """Number of audio streams in a container. (None, gap) on a tooling failure."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None, "ffprobe not found on PATH; audio track mapping unavailable"
+    try:
+        proc = subprocess.run(  # nosec B603 — fixed argument list, no shell
+            [ffprobe, "-v", "error", "-select_streams", "a", "-show_entries",
+             "stream=index", "-of", "json", path],
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "audio stream enumeration timed out"
+    if proc.returncode != 0:
+        return None, f"ffprobe could not read audio streams from {path!r}"
+    try:
+        streams = json.loads(proc.stdout or "{}").get("streams") or []
+    except json.JSONDecodeError:
+        return None, "ffprobe returned unparseable audio stream data"
+    return len(streams), None
 
-    Returns (md5, unavailable_reason). (None, None) means the file genuinely
-    has no decodable audio stream — a real absence, not a tooling gap.
+
+def _decoded_audio_md5_at(path: str, audio_index: int) -> tuple[str | None, str | None]:
+    """MD5 of the decoded audio stream at relative index `audio_index` (content
+    comparison, not container hash: container bytes can differ while audio is
+    equivalent).
+
+    Returns (md5, unavailable_reason). (None, None) means that stream genuinely
+    has no decodable audio — a real absence, not a tooling gap.
     """
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None, "ffmpeg not installed; decoded-audio comparison unavailable"
     proc = subprocess.run(  # nosec B603 — fixed argument list, no shell
-        [ffmpeg, "-v", "error", "-i", path, "-map", "0:a:0", "-vn", "-f", "md5", "-"],
+        [ffmpeg, "-v", "error", "-i", path, "-map", f"0:a:{audio_index}", "-vn", "-f", "md5", "-"],
         capture_output=True,
         text=True,
         timeout=300,
@@ -129,7 +157,13 @@ def _decoded_audio_md5(path: str) -> tuple[str | None, str | None]:
 
 
 def audio_preservation_check(source_path: str, candidate_path: str, intent: dict[str, Any]) -> CheckResult:
-    """Hard constraint when policy says retain: decoded audio must match."""
+    """Hard constraint when policy says retain: every mapped audio track matches.
+
+    Production-sound containers often carry multiple audio tracks. Tracks are
+    mapped explicitly by index and compared per track. A track with no
+    counterpart (unmapped) cannot be verified and is disclosed as a missing
+    sub-check — never silently passed.
+    """
     policy_mode = intent["audio_policy"]["mode"]
     frame_range = intent["frame_range"]
     if policy_mode in ("replace", "mute"):
@@ -139,52 +173,89 @@ def audio_preservation_check(source_path: str, candidate_path: str, intent: dict
             detail=f"audio_policy={policy_mode}: source retention not required",
         )
 
-    source_md5, source_gap = _decoded_audio_md5(source_path)
-    candidate_md5, candidate_gap = _decoded_audio_md5(candidate_path)
-
-    tool_gap = source_gap or candidate_gap
+    src_count, src_gap = _audio_stream_count(source_path)
+    cand_count, cand_gap = _audio_stream_count(candidate_path)
+    tool_gap = src_gap or cand_gap
     if tool_gap:
         return CheckResult(CHECK_AUDIO_PRESERVATION, "unavailable", detail=tool_gap)
-
-    if source_md5 is None and candidate_md5 is None:
+    if src_count is None or cand_count is None:
+        return CheckResult(
+            CHECK_AUDIO_PRESERVATION, "unavailable",
+            detail="audio stream count could not be determined",
+        )
+    if not src_count:
         return CheckResult(
             CHECK_AUDIO_PRESERVATION,
             "unavailable",
-            detail="no decodable audio stream in source or candidate",
+            detail="source has no audio stream; retention cannot be verified",
         )
-    if source_md5 is None:
+
+    findings: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    compared = 0
+    mismatched = 0
+    # Map source track i -> candidate track i explicitly and compare per track.
+    for i in range(src_count):
+        if i >= cand_count:
+            # Source audio track dropped by the candidate: under a retain policy
+            # this is a hard retention violation, not merely an unmapped gap.
+            findings.append(_finding(
+                f"ap-{i + 1}", "audio_policy", "hard", "decoded_audio_md5", frame_range,
+                "blocking", "low",
+                f"candidate dropped source audio track {i} but audio_policy={policy_mode}",
+            ))
+            mismatched += 1
+            continue
+        s_md5, s_gap = _decoded_audio_md5_at(source_path, i)
+        c_md5, c_gap = _decoded_audio_md5_at(candidate_path, i)
+        gap = s_gap or c_gap
+        if gap:
+            missing.append({"check": f"{CHECK_AUDIO_PRESERVATION}[track {i}]", "reason": gap})
+            continue
+        if s_md5 is None:
+            missing.append({
+                "check": f"{CHECK_AUDIO_PRESERVATION}[track {i}]",
+                "reason": "source track has no decodable audio; retention cannot be verified",
+            })
+            continue
+        if c_md5 is None:
+            findings.append(_finding(
+                f"ap-{i + 1}", "audio_policy", "hard", "decoded_audio_md5", frame_range,
+                "blocking", "low",
+                f"candidate audio track {i} missing but audio_policy={policy_mode}",
+            ))
+            mismatched += 1
+            continue
+        compared += 1
+        if c_md5 != s_md5:
+            findings.append(_finding(
+                f"ap-{i + 1}", "audio_policy", "hard", "decoded_audio_md5", frame_range,
+                "blocking", "low",
+                f"decoded audio track {i} differs (source={s_md5[:12]}… candidate={c_md5[:12]}…) "
+                f"but audio_policy={policy_mode}",
+            ))
+            mismatched += 1
+    # Candidate tracks beyond the source count are unmapped additions.
+    for i in range(src_count, cand_count):
+        missing.append({
+            "check": f"{CHECK_AUDIO_PRESERVATION}[track {i}]",
+            "reason": f"candidate audio track {i} has no source counterpart (unmapped addition); not compared",
+        })
+
+    if mismatched:
+        detail = f"{mismatched} of {src_count} audio track(s) violated retention"
+    else:
+        detail = f"decoded audio identical on {compared} mapped track(s)"
+    if missing:
+        detail += f"; {len(missing)} track(s) unmapped or unverified"
+    if mismatched:
+        return CheckResult(CHECK_AUDIO_PRESERVATION, "fail", findings, detail=detail, missing=missing)
+    if compared == 0:
         return CheckResult(
-            CHECK_AUDIO_PRESERVATION,
-            "unavailable",
-            detail="source has no decodable audio stream; retention cannot be verified",
+            CHECK_AUDIO_PRESERVATION, "unavailable",
+            detail="no source audio track could be compared", missing=missing,
         )
-
-    if candidate_md5 is None:
-        finding = _finding(
-            "ap-1",
-            "audio_policy",
-            "hard",
-            "decoded_audio_md5",
-            frame_range,
-            "blocking",
-            "low",
-            f"candidate has no decodable audio stream but audio_policy={policy_mode}",
-        )
-        return CheckResult(CHECK_AUDIO_PRESERVATION, "fail", [finding], detail="candidate audio missing")
-
-    if candidate_md5 != source_md5:
-        finding = _finding(
-            "ap-1",
-            "audio_policy",
-            "hard",
-            "decoded_audio_md5",
-            frame_range,
-            "blocking",
-            "low",
-            f"decoded audio differs (source={source_md5[:12]}… candidate={candidate_md5[:12]}…) but audio_policy={policy_mode}",
-        )
-        return CheckResult(CHECK_AUDIO_PRESERVATION, "fail", [finding], detail="decoded audio mismatch")
-    return CheckResult(CHECK_AUDIO_PRESERVATION, "pass", detail="decoded audio identical")
+    return CheckResult(CHECK_AUDIO_PRESERVATION, "pass", detail=detail, missing=missing)
 
 
 REGION_PSNR_THRESHOLD = 30.0  # provisional default; frozen only after dev-set calibration
@@ -244,6 +315,7 @@ def protected_region_check(source_path: str, candidate_path: str, intent: dict[s
     not verdicts on the performance or meaning.
     """
     region = None
+    region_kind = None
     constraint_kind = "protected_content"
     for item in intent.get("protected_content", []):
         candidate_region = item.get("region") or {}
@@ -251,14 +323,48 @@ def protected_region_check(source_path: str, candidate_path: str, intent: dict[s
             isinstance(candidate_region.get(k), (int, float)) for k in ("x", "y", "width", "height")
         ):
             region = candidate_region
+            region_kind = "bbox_per_frame"
             constraint_kind = f"protected_content[{item.get('kind', 'region')}]"
             break
+        if candidate_region.get("kind") == "mask_sequence" and region is None:
+            region = candidate_region
+            region_kind = "mask_sequence"
+            constraint_kind = f"protected_content[{item.get('kind', 'region')}]"
     if region is None:
         return CheckResult(
             CHECK_PROTECTED_REGION,
             "unavailable",
             detail="protected region has no machine-readable x/y/width/height; comparison not run",
         )
+
+    if region_kind == "mask_sequence":
+        # Per-frame mask sequence referenced by digest. Masked comparison runs only
+        # against a present, digest-verified mask asset; until then we report
+        # unavailable rather than a hollow pass.
+        from .store import sha256_file
+
+        mask_path = region.get("path")
+        recorded_digest = region.get("digest")
+        if not mask_path:
+            detail = "mask_sequence region has no mask asset path; masked comparison not run"
+        elif not Path(mask_path).is_file():
+            detail = (
+                "mask_sequence mask asset not present; masked comparison not run "
+                "(falls back to unavailable until the per-frame mask asset is supplied)"
+            )
+        else:
+            actual = sha256_file(mask_path)
+            if recorded_digest and actual != recorded_digest:
+                detail = (
+                    f"mask_sequence mask asset digest mismatch (recorded {recorded_digest}, "
+                    f"actual {actual}); masked comparison not run"
+                )
+            else:
+                detail = (
+                    "mask_sequence mask asset present but per-frame masked comparison is not "
+                    "yet validated on a real mask set; reporting unavailable rather than a hollow pass"
+                )
+        return CheckResult(CHECK_PROTECTED_REGION, "unavailable", detail=detail)
 
     frames, error = _region_psnr(source_path, candidate_path, region)
     if error:
@@ -443,5 +549,6 @@ def run_checks(
             if result.detail:
                 entry["detail"] = result.detail
             checks_run.append(entry)
+        missing_checks.extend(result.missing)
         findings.extend(result.findings)
     return {"checks_run": checks_run, "findings": findings, "missing_checks": missing_checks}

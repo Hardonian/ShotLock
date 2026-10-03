@@ -76,6 +76,15 @@ class ProcessEdit(unittest.TestCase):
         self.store = EvidenceStore(tempfile.mkdtemp(prefix="store-", dir=self.tmp))
         self.digest = sha256_file(self.source)
         self.intent = make_intent(self.digest)
+        # a recorded clearance/permission for THIS source — step 1 of the flow
+        self.store.record_clearance({
+            "clearance_id": "clr-test",
+            "project_id": "p-test",
+            "source_digest": self.digest,
+            "cleared_by": "Test Rights Holder",
+            "cleared_at": "2026-10-03T12:00:00Z",
+            "scope": "edit_review",
+        })
 
     def test_identical_candidate_passes_hard_checks(self):
         result = process_edit(self.store, self.intent, str(self.source), str(self.identical))

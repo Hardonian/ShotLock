@@ -125,7 +125,15 @@ def _write_csv(report: dict[str, Any], path: Path) -> None:
             ])
 
 
-def _try_otio(report: dict[str, Any], out_dir: Path) -> dict[str, Any]:
+def _try_otio(report: dict[str, Any], out_dir: Path, intent: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Export an OTIO timeline whose clip carries the shot's source_range.
+
+    source_range is taken from the intent's frame_range at the intent's rational
+    frame rate. The timeline is only reported as exported when it writes AND
+    re-reads cleanly; otherwise the manifest records it as unavailable rather
+    than shipping something untested. Editor/adapter compatibility is NOT
+    claimed — validate the actual target editor and adapter.
+    """
     try:
         import opentimelineio as otio  # type: ignore
     except ImportError:
@@ -134,9 +142,35 @@ def _try_otio(report: dict[str, Any], out_dir: Path) -> dict[str, Any]:
         timeline = otio.schema.Timeline(name=report["report_id"])
         track = otio.schema.Track(name="shot")
         timeline.tracks.append(track)
+
+        frame_range = (intent or {}).get("frame_range") or {}
+        rate = (intent or {}).get("frame_rate") or {}
+        start = frame_range.get("start", 0)
+        end = frame_range.get("end_exclusive", 0)
+        fps = (rate.get("numerator") or 24) / (rate.get("denominator") or 1)
+
+        source_range = None
+        if end > start:
+            source_start = otio.opentime.RationalTime(start, fps)
+            source_duration = otio.opentime.RationalTime(end - start, fps)
+            source_range = otio.opentime.TimeRange(source_start, source_duration)
+            clip = otio.schema.Clip(name=report["run_id"], source_range=source_range)
+            track.append(clip)
+
         path = out_dir / "timeline.otio"
         otio.adapters.write_to_file(timeline, str(path))
-        return {"status": "exported", "path": path.name, "note": "shot ranges to be mapped week 3; adapter validation still required"}
+        # validate by re-reading what we wrote — never ship an unvalidated file
+        otio.adapters.read_from_file(str(path))
+
+        entry: dict[str, Any] = {
+            "status": "exported",
+            "path": path.name,
+            "source_range": {"start": start, "end_exclusive": end, "rate": fps},
+            "note": "source_range taken from intent frame_range; editor/adapter compatibility not claimed — validate the target editor",
+        }
+        if source_range is None:
+            entry["note"] = "intent frame_range empty; timeline has no clip source_range"
+        return entry
     except Exception as exc:  # validation failed — say so, do not ship broken output
         return {"status": UNAVAILABLE, "reason": f"OTIO export failed validation: {exc}"}
 
@@ -179,7 +213,7 @@ def export_package(
     selected = out / ("selected_media" + Path(candidate_path).suffix)
     shutil.copy2(candidate_path, selected)
 
-    otio_status = _try_otio(report, out)
+    otio_status = _try_otio(report, out, intent)
 
     if source_path is not None and intent is not None:
         from .viewer import generate_viewer
