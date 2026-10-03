@@ -6,10 +6,11 @@ and `bandit -q -r src/ tests/` before every commit; push to origin main.
 
 ## Overnight candidates
 
-1. **Finding snapshots.** Extract supporting_images for each finding
-   (ffmpeg frame grab at the finding's frame range, source vs candidate
-   side-by-side) and link them from findings + the HTML report. Directly
-   serves "supporting images" in the review-report spec.
+1. ~~**Finding snapshots.**~~ **DONE** (2026-10-03). `src/shotlock/snapshots.py`
+   (`attach_finding_snapshots`) grabs source|candidate side-by-side at each
+   finding's frame range, links `supporting_images`/`inspect_path`, and renders
+   an `evidence` column in `report.html`. Honest degradation: uncapturable
+   frames keep empty `supporting_images` + a manifest gap. 5 tests.
 2. **Frame-duplicate detector.** Detect duplicated frames (compare consecutive
    decoded frames within the allowed edit region exclusion); validate against
    `fixtures.inject_duplicated_frame` output. Review signal, localized.
