@@ -30,6 +30,16 @@ def _render_html(report: dict[str, Any]) -> str:
     def esc(value: Any) -> str:
         return html.escape(str(value))
 
+    def evidence_cell(f: dict) -> str:
+        images = f.get("supporting_images") or []
+        if not images:
+            return "<span class='meta'>(none)</span>"
+        return " ".join(
+            f"<a href=\"{esc(src)}\"><img src=\"{esc(src)}\" alt=\"{esc(f.get('finding_id'))}\" "
+            "style=\"max-width:220px;border:1px solid #ccc\"></a>"
+            for src in images
+        )
+
     findings_rows = "".join(
         "<tr>"
         f"<td>{esc(f.get('finding_id'))}</td>"
@@ -39,9 +49,10 @@ def _render_html(report: dict[str, Any]) -> str:
         f"<td>{esc(f.get('frame_range'))}</td>"
         f"<td>{esc(f.get('severity'))}</td>"
         f"<td>{esc((f.get('uncertainty') or {}).get('level'))}: {esc((f.get('uncertainty') or {}).get('note'))}</td>"
+        f"<td>{evidence_cell(f)}</td>"
         "</tr>"
         for f in report["findings"]
-    ) or "<tr><td colspan='7'>(no findings)</td></tr>"
+    ) or "<tr><td colspan='8'>(no findings)</td></tr>"
 
     missing_rows = "".join(
         f"<li><strong>{esc(m['check'])}</strong>: {esc(m['reason'])}</li>"
@@ -81,7 +92,7 @@ generated {esc(report['generated_at'])}</p>
 <ul>{missing_rows}</ul></div>
 
 <h2>Findings</h2>
-<table><thead><tr><th>id</th><th>constraint</th><th>class</th><th>method</th><th>frames</th><th>severity</th><th>uncertainty</th></tr></thead>
+<table><thead><tr><th>id</th><th>constraint</th><th>class</th><th>method</th><th>frames</th><th>severity</th><th>uncertainty</th><th>evidence</th></tr></thead>
 <tbody>{findings_rows}</tbody></table>
 
 <h2>Checks run</h2><ul>{checks_rows}</ul>
@@ -147,6 +158,19 @@ def export_package(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    from .snapshots import attach_finding_snapshots
+
+    if source_path is not None:
+        snapshot_status: dict[str, Any] = attach_finding_snapshots(
+            report, source_path, candidate_path, out
+        )
+    else:
+        snapshot_status = {
+            "status": UNAVAILABLE,
+            "reason": "finding snapshots need source_path (report-only export)",
+            "generated": 0,
+        }
+
     findings_path = out / "findings.json"
     findings_path.write_text(json.dumps(report, indent=2, sort_keys=True))
     _write_csv(report, out / "issues.csv")
@@ -178,6 +202,7 @@ def export_package(
             "selected_media": selected.name,
         },
         "viewer": viewer_status,
+        "snapshots": snapshot_status,
         "otio_timeline": otio_status,
         "missing_checks": report["missing_checks"],
         "analysis_transforms": report["analysis_transforms"],
