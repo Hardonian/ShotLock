@@ -134,8 +134,16 @@ def export_package(
     report: dict[str, Any],
     candidate_path: str,
     out_dir: str | Path,
+    *,
+    source_path: str | Path | None = None,
+    intent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Write the handoff package. Returns the manifest (also written to disk)."""
+    """Write the handoff package. Returns the manifest (also written to disk).
+
+    The synchronized viewer is included when source and intent are provided;
+    otherwise the manifest records it as unavailable rather than shipping a
+    half-working page.
+    """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +157,16 @@ def export_package(
 
     otio_status = _try_otio(report, out)
 
+    if source_path is not None and intent is not None:
+        from .viewer import generate_viewer
+
+        viewer_status: dict[str, Any] = generate_viewer(report, intent, source_path, candidate_path, out)
+    else:
+        viewer_status = {
+            "status": UNAVAILABLE,
+            "reason": "synchronized viewer needs source_path and intent (report-only export)",
+        }
+
     manifest = {
         "report_id": report["report_id"],
         "run_id": report["run_id"],
@@ -159,6 +177,7 @@ def export_package(
             "issues_csv": "issues.csv",
             "selected_media": selected.name,
         },
+        "viewer": viewer_status,
         "otio_timeline": otio_status,
         "missing_checks": report["missing_checks"],
         "analysis_transforms": report["analysis_transforms"],

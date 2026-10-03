@@ -10,6 +10,7 @@ comparison method, frame range, severity, uncertainty.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess  # nosec B404 — ffmpeg invoked with fixed argument lists, never a shell
 from dataclasses import dataclass, field
@@ -20,8 +21,6 @@ from .media import UNAVAILABLE, FfprobeMissing, compare_integrity, inspect_media
 CHECK_MEDIA_INTEGRITY = "media_integrity"
 CHECK_AUDIO_PRESERVATION = "audio_preservation"
 CHECK_PROTECTED_REGION = "protected_region_stability"
-
-WEEK2_REASON = "not implemented yet (week 2 deliverable: protected-region checks)"
 
 
 @dataclass
@@ -187,10 +186,115 @@ def audio_preservation_check(source_path: str, candidate_path: str, intent: dict
     return CheckResult(CHECK_AUDIO_PRESERVATION, "pass", detail="decoded audio identical")
 
 
-def protected_region_check(*_args: Any, **_kwargs: Any) -> CheckResult:
-    """Registered region comparison — week 2. Reported as unavailable, never
-    as passed."""
-    return CheckResult(CHECK_PROTECTED_REGION, "unavailable", detail=WEEK2_REASON)
+REGION_PSNR_THRESHOLD = 30.0  # provisional default; frozen only after dev-set calibration
+
+
+def _region_psnr(
+    source_path: str, candidate_path: str, box: dict[str, Any]
+) -> tuple[list[tuple[int, float]], str | None]:
+    """Per-frame PSNR of the registered region crop. Returns (frames, error).
+
+    Frames are (frame_index, psnr_db) pairs over the compared range; psnr is
+    inf where the crop is bit-identical. An error means the comparison did not
+    run — callers must report that as unavailable, never as passed.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return [], "ffmpeg not installed; registered region comparison unavailable"
+    crop = f"crop={int(box['width'])}:{int(box['height'])}:{int(box['x'])}:{int(box['y'])}"
+    filter_complex = f"[0:v]{crop},format=gray[a];[1:v]{crop},format=gray[b];[a][b]psnr=stats_file=-"
+    try:
+        proc = subprocess.run(  # nosec B603 — fixed argument list, no shell
+            [ffmpeg, "-v", "error", "-i", source_path, "-i", candidate_path,
+             "-filter_complex", filter_complex, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return [], "psnr comparison timed out"
+    if proc.returncode != 0:
+        return [], f"psnr comparison failed: {proc.stderr.strip()[:200]}"
+    frames: list[tuple[int, float]] = []
+    for line in proc.stdout.splitlines():
+        match = re.match(r"\s*n:\s*(\d+)\s+.*?psnr_avg:\s*([0-9.]+|inf)", line)
+        if match:
+            value = float("inf") if match.group(2) == "inf" else float(match.group(2))
+            # psnr stats n: is 1-based; frame indices in findings are 0-based
+            frames.append((int(match.group(1)) - 1, value))
+    return frames, None
+
+
+def _frame_ranges(indices: list[int]) -> list[dict[str, int]]:
+    """Group contiguous frame indices into [start, end_exclusive) ranges."""
+    ranges: list[dict[str, int]] = []
+    for n in sorted(set(indices)):
+        if ranges and n == ranges[-1]["end_exclusive"]:
+            ranges[-1]["end_exclusive"] = n + 1
+        else:
+            ranges.append({"start": n, "end_exclusive": n + 1})
+    return ranges
+
+
+def protected_region_check(source_path: str, candidate_path: str, intent: dict[str, Any]) -> CheckResult:
+    """Registered region comparison over protected content.
+
+    Uses per-frame PSNR on the region crop and localizes degraded frames to
+    ranges. The threshold is a provisional default (REGION_PSNR_THRESHOLD) and
+    findings carry that uncertainty: they are review signals routed to a human,
+    not verdicts on the performance or meaning.
+    """
+    region = None
+    constraint_kind = "protected_content"
+    for item in intent.get("protected_content", []):
+        candidate_region = item.get("region") or {}
+        if candidate_region.get("kind") == "bbox_per_frame" and all(
+            isinstance(candidate_region.get(k), (int, float)) for k in ("x", "y", "width", "height")
+        ):
+            region = candidate_region
+            constraint_kind = f"protected_content[{item.get('kind', 'region')}]"
+            break
+    if region is None:
+        return CheckResult(
+            CHECK_PROTECTED_REGION,
+            "unavailable",
+            detail="protected region has no machine-readable x/y/width/height; comparison not run",
+        )
+
+    frames, error = _region_psnr(source_path, candidate_path, region)
+    if error:
+        return CheckResult(CHECK_PROTECTED_REGION, "unavailable", detail=error)
+    if not frames:
+        return CheckResult(
+            CHECK_PROTECTED_REGION, "unavailable", detail="no comparable frames in the region crop"
+        )
+
+    degraded = [n for n, psnr in frames if psnr < REGION_PSNR_THRESHOLD]
+    minimum = min((p for _, p in frames if p != float("inf")), default=float("inf"))
+    detail = (
+        f"region PSNR min={minimum if minimum != float('inf') else 'inf'} dB "
+        f"over {len(frames)} compared frames; provisional threshold {REGION_PSNR_THRESHOLD} dB"
+    )
+    if not degraded:
+        return CheckResult(CHECK_PROTECTED_REGION, "pass", detail=detail)
+
+    findings = [
+        _finding(
+            f"pr-{i + 1}",
+            constraint_kind,
+            "review_signal",
+            "psnr_registered_region",
+            frame_range,
+            "review",
+            "medium",
+            (
+                f"protected region degraded in frames "
+                f"{frame_range['start']}–{frame_range['end_exclusive'] - 1} "
+                f"(provisional threshold {REGION_PSNR_THRESHOLD} dB; not yet calibrated on a dev set)"
+            ),
+            affected_region={"kind": "bbox_per_frame", **{k: region[k] for k in ("x", "y", "width", "height")}},
+        )
+        for i, frame_range in enumerate(_frame_ranges(degraded))
+    ]
+    return CheckResult(CHECK_PROTECTED_REGION, "fail", findings, detail=detail)
 
 
 def run_checks(
@@ -205,7 +309,7 @@ def run_checks(
     results = [
         media_integrity_check(source_path, candidate_path, intent),
         audio_preservation_check(source_path, candidate_path, intent),
-        protected_region_check(),
+        protected_region_check(source_path, candidate_path, intent),
     ]
     checks_run: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []

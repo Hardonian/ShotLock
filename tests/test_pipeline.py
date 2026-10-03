@@ -91,8 +91,10 @@ class ProcessEdit(unittest.TestCase):
     def test_missing_checks_disclosed_not_passed(self):
         result = process_edit(self.store, self.intent, str(self.source), str(self.identical))
         missing = {m["check"]: m["reason"] for m in result["report"]["missing_checks"]}
+        # make_intent's region has no machine-readable coordinates, so the
+        # region comparison does not run and must be disclosed as such
         self.assertIn("protected_region_stability", missing)
-        self.assertIn("week 2", missing["protected_region_stability"])
+        self.assertIn("machine-readable", missing["protected_region_stability"])
         run_names = {c["check"] for c in result["report"]["checks_run"]}
         self.assertNotIn("protected_region_stability", run_names)
 

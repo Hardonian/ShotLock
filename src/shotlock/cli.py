@@ -76,8 +76,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "missing_checks": [m["check"] for m in report["missing_checks"]],
     }
     if args.out:
-        manifest = export_package(report, args.candidate, args.out)
+        manifest = export_package(
+            report, args.candidate, args.out, source_path=args.source, intent=intent
+        )
         summary["export"] = {k: v for k, v in manifest["files"].items()}
+        summary["viewer"] = manifest["viewer"]["status"]
         summary["otio_timeline"] = manifest["otio_timeline"]["status"]
     print(json.dumps(summary, indent=2))
     return 0
