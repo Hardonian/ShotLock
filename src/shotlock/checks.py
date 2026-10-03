@@ -21,6 +21,7 @@ from .media import UNAVAILABLE, FfprobeMissing, compare_integrity, inspect_media
 CHECK_MEDIA_INTEGRITY = "media_integrity"
 CHECK_AUDIO_PRESERVATION = "audio_preservation"
 CHECK_PROTECTED_REGION = "protected_region_stability"
+CHECK_FRAME_DUPLICATE = "frame_duplicate"
 
 
 @dataclass
@@ -297,6 +298,123 @@ def protected_region_check(source_path: str, candidate_path: str, intent: dict[s
     return CheckResult(CHECK_PROTECTED_REGION, "fail", findings, detail=detail)
 
 
+def _edit_region_box(intent: dict[str, Any]) -> dict[str, Any] | None:
+    """The allowed edit region as a machine-readable bbox, or None if it has none."""
+    region = intent.get("allowed_edit_region") or {}
+    if region.get("kind") == "bbox_per_frame" and all(
+        isinstance(region.get(k), (int, float)) for k in ("x", "y", "width", "height")
+    ):
+        return region
+    return None
+
+
+def _consecutive_psnr(
+    path: str, box: dict[str, Any] | None
+) -> tuple[list[tuple[int, float]], str | None]:
+    """Per-consecutive-frame-pair PSNR of a clip. Returns (pairs, error).
+
+    pairs are (n, psnr_db) where output n compares frame n vs frame n+1 (psnr is
+    inf when a pair is bit-identical). When a box is given, that region is masked
+    to black in both sides so only the preserved content drives the comparison
+    (the allowed edit region is excluded). An error means the comparison did not
+    run — callers must report that as unavailable, never as passed.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return [], "ffmpeg not installed; frame-duplicate comparison unavailable"
+    if box is not None:
+        mask = (
+            f"drawbox=x={int(box['x'])}:y={int(box['y'])}"
+            f":w={int(box['width'])}:h={int(box['height'])}:color=black:t=fill"
+        )
+        filter_complex = (
+            f"[0:v]split[a][b];[a]{mask}[m];"
+            f"[b]trim=start_frame=1,setpts=PTS-STARTPTS,{mask}[n];"
+            "[m][n]psnr=stats_file=-"
+        )
+    else:
+        filter_complex = (
+            "[0:v]split[a][b];[b]trim=start_frame=1,setpts=PTS-STARTPTS[d];"
+            "[a][d]psnr=stats_file=-"
+        )
+    try:
+        proc = subprocess.run(  # nosec B603 — fixed argument list, no shell
+            [ffmpeg, "-v", "error", "-i", path, "-filter_complex", filter_complex, "-f", "null", "-"],
+            capture_output=True, text=True, timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return [], "consecutive-frame comparison timed out"
+    if proc.returncode != 0:
+        return [], f"consecutive-frame comparison failed: {proc.stderr.strip()[:200]}"
+    pairs: list[tuple[int, float]] = []
+    for line in proc.stdout.splitlines():
+        match = re.match(r"\s*n:\s*(\d+)\s+.*?psnr_avg:\s*([0-9.]+|inf)", line)
+        if match:
+            value = float("inf") if match.group(2) == "inf" else float(match.group(2))
+            pairs.append((int(match.group(1)), value))
+    # The framesync comparison emits an unreliable trailing value for the one
+    # unpaired frame at the clip end (observed as `inf`); discard it so it is not
+    # mistaken for a duplicated frame.
+    if pairs and pairs[-1][1] == float("inf"):
+        pairs.pop()
+    return pairs, None
+
+
+DUPLICATE_PSNR_THRESHOLD = 55.0  # provisional: re-encoded repeats measure ~71 dB vs ~46 dB for distinct frames
+
+
+def frame_duplicate_check(source_path: str, candidate_path: str, intent: dict[str, Any]) -> CheckResult:
+    """Detect duplicated (near-identical consecutive) frames in the candidate.
+
+    Compares consecutive decoded frames with the allowed edit region excluded,
+    and localizes suspected repeats to frame ranges as REVIEW SIGNALS routed to a
+    human. The threshold is provisional (DUPLICATE_PSNR_THRESHOLD) and findings
+    carry that uncertainty: near-identical consecutive frames can also be a
+    legitimate static hold, so this is evidence for review — not a verdict. This
+    check analyzes the candidate alone (a candidate that inserts a repeat shifts
+    frame alignment, so an index-aligned source comparison would be unreliable).
+    """
+    box = _edit_region_box(intent)
+    pairs, error = _consecutive_psnr(candidate_path, box)
+    if error:
+        return CheckResult(CHECK_FRAME_DUPLICATE, "unavailable", detail=error)
+    if not pairs:
+        return CheckResult(
+            CHECK_FRAME_DUPLICATE, "unavailable", detail="fewer than two comparable candidate frames"
+        )
+
+    exclusion = "allowed edit region excluded" if box else "full frame (allowed edit region had no machine-readable bbox)"
+    duplicate_ns = [n for n, psnr in pairs if psnr == float("inf") or psnr >= DUPLICATE_PSNR_THRESHOLD]
+    if not duplicate_ns:
+        return CheckResult(
+            CHECK_FRAME_DUPLICATE, "pass",
+            detail=f"no consecutive near-identical candidate frames; {exclusion}",
+        )
+
+    findings = [
+        _finding(
+            f"fd-{i + 1}",
+            "temporal_integrity",
+            "review_signal",
+            "consecutive_frame_psnr",
+            {"start": group["start"], "end_exclusive": group["end_exclusive"] + 1},
+            "review",
+            "medium",
+            (
+                f"consecutive candidate frames {group['start']}–{group['end_exclusive']} are near-identical "
+                f"(possible duplicated/held frame; provisional threshold {DUPLICATE_PSNR_THRESHOLD} dB, "
+                f"{exclusion}; may be a legitimate static hold — human review required)"
+            ),
+        )
+        for i, group in enumerate(_frame_ranges(duplicate_ns))
+    ]
+    detail = (
+        f"{len(duplicate_ns)} near-identical consecutive frame pair(s) in the candidate; "
+        f"provisional threshold {DUPLICATE_PSNR_THRESHOLD} dB; {exclusion}"
+    )
+    return CheckResult(CHECK_FRAME_DUPLICATE, "fail", findings, detail=detail)
+
+
 def run_checks(
     source_path: str,
     candidate_path: str,
@@ -310,6 +428,7 @@ def run_checks(
         media_integrity_check(source_path, candidate_path, intent),
         audio_preservation_check(source_path, candidate_path, intent),
         protected_region_check(source_path, candidate_path, intent),
+        frame_duplicate_check(source_path, candidate_path, intent),
     ]
     checks_run: list[dict[str, Any]] = []
     findings: list[dict[str, Any]] = []
