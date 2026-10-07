@@ -11,6 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from shotlock.intent import sign_approval  # noqa: E402
 from shotlock.pipeline import PipelineError, check_budget, process_edit  # noqa: E402
 from shotlock.report import crosscheck_report, validate_report  # noqa: E402
 from shotlock.store import EvidenceStore, sha256_file  # noqa: E402
@@ -33,9 +34,10 @@ def make_intent(source_digest: str, **overrides):
         "protected_content": [{"kind": "foreground_performance", "region": {"kind": "bbox_per_frame"}}],
         "audio_policy": {"mode": "retain_source"},
         "reference_shots": [],
-        "approver": {"name": "Test Director", "approved_at": "2026-10-03T12:00:00Z"},
     }
     record.update(overrides)
+    if "approver" not in overrides:
+        record["approver"] = sign_approval(record, "Test Director", "2026-10-03T12:00:00Z")
     return record
 
 
@@ -151,7 +153,7 @@ class ProcessEdit(unittest.TestCase):
 
     def test_records_are_valid_json(self):
         result = process_edit(self.store, self.intent, str(self.source), str(self.identical))
-        stored = self.store.load_run(result["run"]["run_id"])
+        stored = self.store.load_run(result["run"]["run_id"], project_id="p-test")
         self.assertEqual(stored["output_identity"], "not_claimed")
         self.assertEqual(len(stored["analysis_transforms"]), 1)
 

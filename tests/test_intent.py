@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from shotlock.intent import (  # noqa: E402
     assert_new_run_id,
     approval_covers,
+    sign_approval,
     validate_intent,
     validate_run_record,
 )
@@ -29,9 +30,10 @@ def make_intent(**overrides):
         "protected_content": [{"kind": "foreground_performance", "region": {"kind": "bbox_per_frame"}}],
         "audio_policy": {"mode": "retain_source"},
         "reference_shots": ["sh-02", "sh-04"],
-        "approver": {"name": "Director Name", "approved_at": "2026-10-02T15:00:00Z"},
     }
     record.update(overrides)
+    if "approver" not in overrides:
+        record["approver"] = sign_approval(record, "Director Name", "2026-10-02T15:00:00Z")
     return record
 
 
@@ -81,6 +83,37 @@ class ApprovalBinding(unittest.TestCase):
         record = make_intent()
         del record["approver"]
         self.assertFalse(approval_covers(record, DIGEST))
+
+    def test_expanded_edit_breaks_the_approval(self):
+        # An approval binds the exact revision: silently widening the edit
+        # region is a different edit and must invalidate the approval.
+        record = make_intent()
+        tampered = dict(record)
+        tampered["allowed_edit_region"] = {
+            "kind": "bbox_per_frame", "x": 0, "y": 0, "width": 9999, "height": 9999,
+        }
+        self.assertFalse(approval_covers(tampered, DIGEST))
+        errors = validate_intent(tampered)
+        self.assertTrue(any("approved_record_digest must bind this exact revision" in e for e in errors))
+
+    def test_changed_operation_breaks_the_approval(self):
+        record = make_intent()
+        tampered = dict(record)
+        tampered["requested_operation"] = {"verb": "remove_object", "target": "everything"}
+        self.assertFalse(approval_covers(tampered, DIGEST))
+        errors = validate_intent(tampered)
+        self.assertTrue(any("approved_record_digest" in e for e in errors))
+
+    def test_reapproval_binds_the_new_revision(self):
+        record = make_intent()
+        expanded = dict(record)
+        expanded["intent_revision"] = 2
+        expanded["allowed_edit_region"] = {
+            "kind": "bbox_per_frame", "x": 0, "y": 0, "width": 9999, "height": 9999,
+        }
+        expanded["approver"] = sign_approval(expanded, "Director Name", "2026-10-03T15:00:00Z")
+        self.assertEqual(validate_intent(expanded), [])
+        self.assertTrue(approval_covers(expanded, DIGEST))
 
 
 def make_run(**overrides):

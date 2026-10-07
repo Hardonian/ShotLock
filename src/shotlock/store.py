@@ -97,21 +97,38 @@ class EvidenceStore:
             return None
         return self._load(rel)
 
-    def load_run(self, run_id: str) -> dict[str, Any]:
-        return self._load(Path("runs") / run_id / "run.json")
+    def load_run(self, run_id: str, *, project_id: str) -> dict[str, Any]:
+        """Read one run. Project-scoped: a project reads its own evidence only."""
+        record = self._load(Path("runs") / run_id / "run.json")
+        self._assert_same_project(record.get("project_id"), project_id, f"run {run_id}")
+        return record
 
-    def load_report(self, report_id: str) -> dict[str, Any]:
-        return self._load(Path("reports") / report_id / "report.json")
+    def load_report(self, report_id: str, *, project_id: str) -> dict[str, Any]:
+        """Read one report (findings). Project-scoped via its run's project."""
+        report = self._load(Path("reports") / report_id / "report.json")
+        run = self._load(Path("runs") / report["run_id"] / "run.json")
+        self._assert_same_project(run.get("project_id"), project_id, f"report {report_id}")
+        return report
+
+    @staticmethod
+    def _assert_same_project(record_project_id: Any, project_id: str, what: str) -> None:
+        if record_project_id != project_id:
+            raise PermissionError(
+                f"cross-project read refused: {what} belongs to project "
+                f"{record_project_id!r}, requested by project {project_id!r}"
+            )
 
     def run_ids(self) -> list[str]:
         return sorted(p.name for p in (self.root / "runs").iterdir() if p.is_dir())
 
     def measured_cost_total(self, currency: str = "CAD") -> float:
         """Sum of measured costs across all recorded runs (budget enforcement
-        lives here, outside any language model)."""
+        lives here, outside any language model). Deliberately cross-project:
+        the compute ceiling is one global budget, so this internal ledger reads
+        run records directly instead of through project-scoped load_run."""
         total = 0.0
         for run_id in self.run_ids():
-            cost = self.load_run(run_id).get("measured_cost") or {}
+            cost = self._load(Path("runs") / run_id / "run.json").get("measured_cost") or {}
             if cost.get("currency") == currency and isinstance(cost.get("amount"), (int, float)):
                 total += float(cost["amount"])
         return total

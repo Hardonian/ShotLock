@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from shotlock.intent import sign_approval  # noqa: E402
 from shotlock.permission import validate_clearance  # noqa: E402
 from shotlock.pipeline import PipelineError, process_edit  # noqa: E402
 from shotlock.store import EvidenceStore, sha256_file  # noqa: E402
@@ -18,7 +19,7 @@ HAVE_FFMPEG = bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
 
 
 def make_intent(source_digest: str):
-    return {
+    record = {
         "intent_revision": 1,
         "project_id": "p-test",
         "shot_id": "sh-01",
@@ -31,8 +32,9 @@ def make_intent(source_digest: str):
         "protected_content": [{"kind": "foreground_performance", "region": {"kind": "bbox_per_frame"}}],
         "audio_policy": {"mode": "retain_source"},
         "reference_shots": [],
-        "approver": {"name": "Test Director", "approved_at": "2026-10-03T12:00:00Z"},
     }
+    record["approver"] = sign_approval(record, "Test Director", "2026-10-03T12:00:00Z")
+    return record
 
 
 class ClearanceValidation(unittest.TestCase):

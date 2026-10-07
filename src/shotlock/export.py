@@ -225,10 +225,24 @@ def export_package(
             "reason": "synchronized viewer needs source_path and intent (report-only export)",
         }
 
+    if intent is not None:
+        tested_shot: dict[str, Any] = {
+            "shot_id": intent.get("shot_id"),
+            "frame_range": intent.get("frame_range"),
+            "frame_rate": intent.get("frame_rate"),
+            "reference_shots": intent.get("reference_shots") or [],
+        }
+    else:
+        tested_shot = {
+            "status": UNAVAILABLE,
+            "reason": "tested shot ranges/rate/references need the intent (report-only export)",
+        }
+
     manifest = {
         "report_id": report["report_id"],
         "run_id": report["run_id"],
         "candidate_digest": report["candidate_digest"],
+        "tested_shot": tested_shot,
         "files": {
             "html_report": "report.html",
             "findings_json": "findings.json",

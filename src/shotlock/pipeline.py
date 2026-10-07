@@ -28,6 +28,7 @@ from .intent import (
     validate_intent,
     validate_run_record,
 )
+from .jobs import JobLedger
 from .media import FfprobeMissing, inspect_media
 from .permission import validate_clearance
 from .report import crosscheck_report, validate_report
@@ -81,14 +82,52 @@ def process_edit(
 
     Returns {"run": ..., "report": ...} with the recorded records. Raises
     PipelineError on refusal (no clearance, bad intent, wrong source, budget,
-    bad input).
+    bad input). Every invocation gets a job record: an interrupted worker
+    leaves its job clearly marked (recover via JobLedger.recover_jobs) and
+    never touches prior evidence.
     """
     # 0. budget — enforced before any work, outside any model
     check_budget(store, budget_ceiling_cad)
 
+    # 0b. job ledger — liveness for THIS invocation. Evidence is immutable;
+    #     job state is the one mutable surface. A crashed worker leaves its job
+    #     "running"; recover_jobs() marks it "interrupted" (clearly failed). A
+    #     retry is a new job AND a new run id.
+    source_digest = sha256_file(source_path)
+    ledger = JobLedger(store.root)
+    job = ledger.begin(
+        project_id=intent.get("project_id") if isinstance(intent, dict) else None,
+        source_digest=source_digest,
+        intent_revision=intent.get("intent_revision") if isinstance(intent, dict) else None,
+    )
+    try:
+        result = _process_edit(
+            store, intent, source_path, candidate_path,
+            source_digest=source_digest,
+            backend_name=backend_name,
+            run_id=run_id,
+            measured_cost=measured_cost,
+        )
+    except Exception as exc:
+        ledger.finish(job["job_id"], "failed", detail=f"{type(exc).__name__}: {exc}")
+        raise
+    ledger.finish(job["job_id"], "completed", run_id=result["run"]["run_id"])
+    return result
+
+
+def _process_edit(
+    store: EvidenceStore,
+    intent: dict[str, Any],
+    source_path: str,
+    candidate_path: str,
+    *,
+    source_digest: str,
+    backend_name: str = "imported",
+    run_id: str | None = None,
+    measured_cost: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     # 1. project permission / clearance — refuse unless a clearance is RECORDED
     #    for THIS source (a clearance for one source never clears a different one)
-    source_digest = sha256_file(source_path)
     project_id = intent.get("project_id") if isinstance(intent, dict) else None
     clearance = store.get_clearance(source_digest)
     perm_errors = validate_clearance(clearance, source_digest, project_id)

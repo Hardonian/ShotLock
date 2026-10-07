@@ -127,10 +127,15 @@
     },
     "approver": {
       "type": "object",
-      "required": ["name", "approved_at"],
+      "required": ["name", "approved_at", "approved_record_digest"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "approved_at": { "type": "string", "format": "date-time" },
+        "approved_record_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The approval binding. sha256 over the canonical JSON (sorted keys, no insignificant whitespace) of the approval-bound fields: intent_revision, project_id, shot_id, source_digest, frame_range, frame_rate, requested_operation, allowed_edit_region, allowed_consequence_region, protected_content, audio_policy, reference_shots. The approver signs exactly this revision; changing any bound field (a different media digest or an expanded edit) requires a new intent_revision and a new approval."
+        },
         "role": { "type": "string" }
       },
       "additionalProperties": false

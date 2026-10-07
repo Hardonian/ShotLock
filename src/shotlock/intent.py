@@ -15,6 +15,8 @@ area; that is exclusively the approver's act, recorded in the record itself.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any, Iterable
 
@@ -52,6 +54,46 @@ REQUIRED_RUN_FIELDS = (
     "output_digest",
     "analysis_transforms",
 )
+
+# Fields an approval binds. Changing ANY of them (a different media digest, an
+# expanded edit region, a changed operation) is a different edit and requires a
+# new intent_revision with a new approval.
+APPROVAL_BOUND_FIELDS = (
+    "intent_revision",
+    "project_id",
+    "shot_id",
+    "source_digest",
+    "frame_range",
+    "frame_rate",
+    "requested_operation",
+    "allowed_edit_region",
+    "allowed_consequence_region",
+    "protected_content",
+    "audio_policy",
+    "reference_shots",
+)
+
+
+def approval_digest(record: dict) -> str:
+    """Digest the approver signs: sha256 over the canonical JSON (sorted keys,
+    no insignificant whitespace) of APPROVAL_BOUND_FIELDS. The approver block
+    itself is excluded so the signature can carry the digest."""
+    bound = {key: record.get(key) for key in APPROVAL_BOUND_FIELDS}
+    payload = json.dumps(bound, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def sign_approval(record: dict, name: str, approved_at: str) -> dict[str, Any]:
+    """The approver's act, recorded: binds EXACTLY this revision's content.
+
+    Returns the approver block for the record as it stands right now. Any later
+    change to a bound field invalidates it — which is the point.
+    """
+    return {
+        "name": name,
+        "approved_at": approved_at,
+        "approved_record_digest": approval_digest(record),
+    }
 
 
 def _check_frame_range(fr: Any) -> list[str]:
@@ -122,6 +164,11 @@ def validate_intent(record: dict) -> list[str]:
     approver = record["approver"]
     if not isinstance(approver, dict) or not approver.get("name") or not approver.get("approved_at"):
         errors.append("approver.name and approver.approved_at are required (approval is a human act)")
+    if isinstance(approver, dict) and approver.get("approved_record_digest") != approval_digest(record):
+        errors.append(
+            "approver.approved_record_digest must bind this exact revision; "
+            "a different media digest or an expanded edit requires a new intent_revision and a new approval"
+        )
     return errors
 
 
@@ -134,6 +181,13 @@ def approval_covers(record: dict, source_digest: str, *, requested_operation: di
     approver.
     """
     if not isinstance(record, dict) or not record.get("approver"):
+        return False
+    approver = record["approver"]
+    if not isinstance(approver, dict):
+        return False
+    # The approval must bind THIS exact revision's content: a changed media
+    # digest, expanded edit region, or changed operation is a different edit.
+    if approver.get("approved_record_digest") != approval_digest(record):
         return False
     if record.get("source_digest") != source_digest:
         return False
